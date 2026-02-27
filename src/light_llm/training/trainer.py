@@ -78,7 +78,7 @@ class Trainer:
         # Optimizer & scaler
         # ------------------------------------------------------------------
         self.optimizer = self._build_optimizer()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.dtype == torch.float16))
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=(self.dtype == torch.float16))
 
         # ------------------------------------------------------------------
         # Datasets & loaders
@@ -157,7 +157,7 @@ class Trainer:
                 x = x.to(self.device, non_blocking=True)
                 y = y.to(self.device, non_blocking=True)
 
-                with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                     logits = model(x)
                     loss = F.cross_entropy(
                         logits.reshape(-1, logits.size(-1)),
@@ -238,7 +238,7 @@ class Trainer:
                 break
             x = x.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True)
-            with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                 logits = self.model(x)
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
@@ -364,7 +364,8 @@ class Trainer:
             ds,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
-            pin_memory=True,
+            pin_memory=(self.device.type == "cuda"),
+            persistent_workers=(self.cfg.num_workers > 0),
             collate_fn=LMCollator(),
             # IterableDataset: DataLoader must NOT shuffle; the dataset handles it
             shuffle=False,
