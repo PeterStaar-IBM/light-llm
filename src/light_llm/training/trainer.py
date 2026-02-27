@@ -344,7 +344,7 @@ class Trainer:
         cfg = self.cfg
 
         train_ds = ShardedTokenDataset(
-            shard_paths=self._resolve_paths(cfg.train_data),
+            shard_paths=self._resolve_data(cfg.train_data),
             seq_len=cfg.seq_len,
             base_seed=cfg.seed,
         )
@@ -352,7 +352,7 @@ class Trainer:
         val_ds = None
         if cfg.val_data:
             val_ds = ShardedTokenDataset(
-                shard_paths=self._resolve_paths(cfg.val_data),
+                shard_paths=self._resolve_data(cfg.val_data),
                 seq_len=cfg.seq_len,
                 base_seed=cfg.seed,
             )
@@ -371,7 +371,17 @@ class Trainer:
         )
 
     @staticmethod
-    def _resolve_paths(pattern: str) -> list[Path]:
+    def _resolve_data(sources: str | list[str]) -> list[Path]:
+        """Resolve one or more path strings/globs to a flat list of parquet files."""
+        if isinstance(sources, str):
+            sources = [sources]
+        paths: list[Path] = []
+        for src in sources:
+            paths.extend(Trainer._resolve_one(src))
+        return paths
+
+    @staticmethod
+    def _resolve_one(pattern: str) -> list[Path]:
         p = Path(pattern)
         if p.is_file():
             return [p]

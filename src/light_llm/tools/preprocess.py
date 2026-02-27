@@ -4,9 +4,9 @@ Preprocess text into tokenised parquet shards.
 Output schema
 -------------
 Each output parquet file has four columns:
-  source  – str   : "{repo_id}/{split}:{source_id}" or "{filename}:{row_idx}"
-  length  – int   : number of tokens
-  text    – str   : raw document text
+  source  – str       : "{repo_id}/{split}:{source_id}" or "{filename}:{row_idx}"
+  length  – int       : number of tokens
+  text    – str       : raw document text
   tokens  – list[int] : token ids
 
 Input modes
@@ -14,23 +14,41 @@ Input modes
   --hf-dataset  : stream a HuggingFace dataset (recommended for large corpora)
   --input       : tokenise local text / jsonl / parquet files
 
+Config files
+------------
+Any flag can be stored in a YAML/JSON config and passed via --config/-c.
+CLI flags always override config-file values.
+
+  llm-preprocess --config configs/preprocess/wikipedia_en.yaml
+  llm-preprocess --config configs/preprocess/wikipedia_en.yaml --output data/wiki/train
+
+HF dataset subsets
+------------------
+Many HF datasets have named subsets (configs). Pass them with --hf-config:
+
+  wikimedia/wikipedia   →  --hf-config 20231101.en
+  allenai/c4            →  --hf-config en
+  HuggingFaceFW/fineweb-edu  →  --hf-config CC-MAIN-2024-10
+
 Examples
 --------
-# Stream wikimedia/wikipedia (English, 2023-11-01 snapshot)
+# Stream Wikipedia using a preprocess config file
+llm-preprocess --config configs/preprocess/wikipedia_en.yaml
+
+# Stream wikimedia/wikipedia (English), overriding the output dir
+llm-preprocess \\
+    --config configs/preprocess/wikipedia_en.yaml \\
+    --output data/wikipedia/val \\
+    --hf-split validation
+
+# Fully inline (no config file)
 llm-preprocess \\
     --hf-dataset wikimedia/wikipedia \\
     --hf-config  20231101.en \\
     --hf-split   train \\
-    --output     data/wikipedia \\
+    --output     data/wikipedia/train \\
     --tokenizer  hf \\
     --tokenizer-path gpt2
-
-# Custom dataset with a user-defined adapter module
-llm-preprocess \\
-    --hf-dataset my-org/my-corpus \\
-    --adapter-module adapters/my_adapter.py \\
-    --output data/my-corpus \\
-    --tokenizer hf --tokenizer-path meta-llama/Meta-Llama-3-8B
 
 # Local text files
 llm-preprocess \\
@@ -53,6 +71,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
 
 from light_llm.data.hf_adapters import DatasetAdapter, get_adapter
+from light_llm.data.preprocess_config import PreprocessConfig
 from light_llm.tokenizer import BPETokenizer, CharTokenizer, HFTokenizer
 from light_llm.tokenizer.base import BaseTokenizer
 
@@ -62,72 +81,216 @@ app = typer.Typer(help="Tokenise datasets into parquet shards.")
 
 @app.command()
 def main(
-    # ---- Source: HF Hub ----
-    hf_dataset: Annotated[Optional[str], typer.Option("--hf-dataset", help="HuggingFace dataset repo ID.")] = None,
-    hf_config: Annotated[Optional[str], typer.Option("--hf-config", help="Dataset config name (e.g. '20231101.en' for Wikipedia).")] = None,
-    hf_split: Annotated[str, typer.Option("--hf-split", help="Dataset split to use.")] = "train",
-    trust_remote_code: Annotated[bool, typer.Option(help="Trust remote code when loading HF datasets.")] = False,
-    adapter_module: Annotated[Optional[str], typer.Option("--adapter-module", help="Python file with custom DatasetAdapter registrations.")] = None,
+    # ---- Config file -------------------------------------------------------
+    config: Annotated[
+        Optional[str],
+        typer.Option("--config", "-c", help="YAML/JSON preprocess config file. CLI flags override values from the file."),
+    ] = None,
 
-    # ---- Source: local files ----
-    input: Annotated[Optional[str], typer.Option("--input", "-i", help="Local file, directory, or glob pattern.")] = None,
-    text_column: Annotated[Optional[str], typer.Option(help="Column name for text in parquet/jsonl input.")] = None,
+    # ---- Source: HF Hub ----------------------------------------------------
+    hf_dataset: Annotated[
+        Optional[str],
+        typer.Option("--hf-dataset", help="HuggingFace dataset repo ID."),
+    ] = None,
+    hf_config: Annotated[
+        Optional[str],
+        typer.Option("--hf-config", help="Dataset subset / config name (e.g. '20231101.en' for Wikipedia, 'en' for C4)."),
+    ] = None,
+    hf_split: Annotated[
+        Optional[str],
+        typer.Option("--hf-split", help="Dataset split to use. [default: train]"),
+    ] = None,
+    trust_remote_code: Annotated[
+        Optional[bool],
+        typer.Option("--trust-remote-code/--no-trust-remote-code", help="Trust remote code when loading HF datasets."),
+    ] = None,
+    adapter_module: Annotated[
+        Optional[str],
+        typer.Option("--adapter-module", help="Python file with custom DatasetAdapter registrations."),
+    ] = None,
 
-    # ---- Output ----
-    output: Annotated[str, typer.Option("--output", "-o", help="Output directory for parquet shards.")] = ...,
-    shard_size: Annotated[int, typer.Option(help="Documents per parquet shard.")] = 50_000,
+    # ---- Source: local files -----------------------------------------------
+    input: Annotated[
+        Optional[str],
+        typer.Option("--input", "-i", help="Local file, directory, or glob pattern."),
+    ] = None,
+    text_column: Annotated[
+        Optional[str],
+        typer.Option("--text-column", help="Column name for text in parquet/jsonl input."),
+    ] = None,
 
-    # ---- Tokenizer ----
-    tokenizer: Annotated[str, typer.Option(help="Tokenizer type: hf | bpe | char.")] = "hf",
-    tokenizer_path: Annotated[Optional[str], typer.Option(help="HF model name or saved tokenizer directory.")] = "gpt2",
-    vocab_size: Annotated[int, typer.Option(help="[bpe] Target vocabulary size.")] = 8_000,
-    min_frequency: Annotated[int, typer.Option(help="[bpe] Minimum BPE merge frequency.")] = 2,
-    save_tokenizer: Annotated[Optional[str], typer.Option(help="[bpe/char] Save trained tokenizer to this path.")] = None,
-    add_special_tokens: Annotated[bool, typer.Option(help="Prepend BOS / append EOS to each document.")] = True,
+    # ---- Output ------------------------------------------------------------
+    output: Annotated[
+        Optional[str],
+        typer.Option("--output", "-o", help="Output directory for parquet shards."),
+    ] = None,
+    shard_size: Annotated[
+        Optional[int],
+        typer.Option("--shard-size", help="Documents per parquet shard. [default: 50000]"),
+    ] = None,
 
-    # ---- Filtering ----
-    min_length: Annotated[int, typer.Option(help="Minimum token count; shorter documents are dropped.")] = 32,
+    # ---- Tokenizer ---------------------------------------------------------
+    tokenizer: Annotated[
+        Optional[str],
+        typer.Option("--tokenizer", help="Tokenizer type: hf | bpe | char. [default: hf]"),
+    ] = None,
+    tokenizer_path: Annotated[
+        Optional[str],
+        typer.Option("--tokenizer-path", help="HF model name or saved tokenizer directory. [default: gpt2]"),
+    ] = None,
+    vocab_size: Annotated[
+        Optional[int],
+        typer.Option("--vocab-size", help="[bpe] Target vocabulary size. [default: 8000]"),
+    ] = None,
+    min_frequency: Annotated[
+        Optional[int],
+        typer.Option("--min-frequency", help="[bpe] Minimum BPE merge frequency. [default: 2]"),
+    ] = None,
+    save_tokenizer: Annotated[
+        Optional[str],
+        typer.Option("--save-tokenizer", help="[bpe/char] Save trained tokenizer to this path."),
+    ] = None,
+    add_special_tokens: Annotated[
+        Optional[bool],
+        typer.Option("--add-special-tokens/--no-add-special-tokens", help="Prepend BOS / append EOS to each document. [default: true]"),
+    ] = None,
+
+    # ---- Filtering ---------------------------------------------------------
+    min_length: Annotated[
+        Optional[int],
+        typer.Option("--min-length", help="Minimum token count; shorter documents are dropped. [default: 32]"),
+    ] = None,
 ) -> None:
 
-    if hf_dataset is None and input is None:
-        console.print("[red]Provide either --hf-dataset or --input.[/red]")
+    # ------------------------------------------------------------------
+    # Build effective config: defaults → YAML/JSON → CLI overrides
+    # ------------------------------------------------------------------
+    cfg = _load_config(config)
+    _apply_cli_overrides(cfg, {
+        "hf_dataset":        hf_dataset,
+        "hf_config":         hf_config,
+        "hf_split":          hf_split,
+        "trust_remote_code": trust_remote_code,
+        "adapter_module":    adapter_module,
+        "input":             input,
+        "text_column":       text_column,
+        "output":            output,
+        "shard_size":        shard_size,
+        "tokenizer":         tokenizer,
+        "tokenizer_path":    tokenizer_path,
+        "vocab_size":        vocab_size,
+        "min_frequency":     min_frequency,
+        "save_tokenizer":    save_tokenizer,
+        "add_special_tokens": add_special_tokens,
+        "min_length":        min_length,
+    })
+
+    # Validate required fields
+    if cfg.hf_dataset is None and cfg.input is None:
+        console.print("[red]Provide either --hf-dataset or --input (or set them in a --config file).[/red]")
+        raise typer.Exit(1)
+    if cfg.output is None:
+        console.print("[red]--output is required (or set 'output' in a --config file).[/red]")
+        raise typer.Exit(1)
+    if cfg.hf_config and cfg.hf_configs:
+        console.print("[red]Use either hf_config (single) or hf_configs (list), not both.[/red]")
         raise typer.Exit(1)
 
     # ------------------------------------------------------------------
     # Load optional custom adapter module
     # ------------------------------------------------------------------
-    if adapter_module:
-        _load_adapter_module(adapter_module)
+    if cfg.adapter_module:
+        _load_adapter_module(cfg.adapter_module)
 
     # ------------------------------------------------------------------
     # Build tokenizer
     # ------------------------------------------------------------------
-    local_files: list[Path] = [] if hf_dataset else _collect_files(input or "")
-    tok = _build_tokenizer(tokenizer, tokenizer_path, vocab_size, min_frequency, save_tokenizer, local_files)
+    local_files: list[Path] = [] if cfg.hf_dataset else _collect_files(cfg.input or "")
+    tok = _build_tokenizer(cfg.tokenizer, cfg.tokenizer_path, cfg.vocab_size, cfg.min_frequency, cfg.save_tokenizer, local_files)
     console.print(f"[green]Tokenizer: {tok}[/green]")
 
     # ------------------------------------------------------------------
     # Stream source documents
     # ------------------------------------------------------------------
-    out_dir = Path(output)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_out = Path(cfg.output)
 
-    if hf_dataset:
-        source_iter = _stream_hf(hf_dataset, hf_config, hf_split, trust_remote_code)
-        source_name = f"{hf_dataset}/{hf_split}"
+    if cfg.hf_configs:
+        # Multiple subsets: process each in sequence, each to its own subdirectory
+        console.print(f"[bold]Processing {len(cfg.hf_configs)} subsets of {cfg.hf_dataset!r}[/bold]")
+        for subset in cfg.hf_configs:
+            console.rule(f"[cyan]{subset}[/cyan]")
+            out_dir = base_out / subset
+            out_dir.mkdir(parents=True, exist_ok=True)
+            source_iter = _stream_hf(cfg.hf_dataset, subset, cfg.hf_split, cfg.trust_remote_code)
+            _process_and_write(
+                source_iter=source_iter,
+                source_name=f"{cfg.hf_dataset}/{cfg.hf_split}/{subset}",
+                tok=tok,
+                out_dir=out_dir,
+                shard_size=cfg.shard_size,
+                add_special_tokens=cfg.add_special_tokens,
+                min_length=cfg.min_length,
+            )
     else:
-        source_iter = _stream_local(local_files, text_column)
-        source_name = input or "local"
+        base_out.mkdir(parents=True, exist_ok=True)
+        if cfg.hf_dataset:
+            source_iter = _stream_hf(cfg.hf_dataset, cfg.hf_config, cfg.hf_split, cfg.trust_remote_code)
+            source_name = f"{cfg.hf_dataset}/{cfg.hf_split}"
+        else:
+            source_iter = _stream_local(local_files, cfg.text_column)
+            source_name = cfg.input or "local"
 
-    _process_and_write(
-        source_iter=source_iter,
-        source_name=source_name,
-        tok=tok,
-        out_dir=out_dir,
-        shard_size=shard_size,
-        add_special_tokens=add_special_tokens,
-        min_length=min_length,
-    )
+        _process_and_write(
+            source_iter=source_iter,
+            source_name=source_name,
+            tok=tok,
+            out_dir=base_out,
+            shard_size=cfg.shard_size,
+            add_special_tokens=cfg.add_special_tokens,
+            min_length=cfg.min_length,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Config loading / merging
+# ---------------------------------------------------------------------------
+
+def _load_config(path: Optional[str]) -> PreprocessConfig:
+    """Load a YAML or JSON preprocess config, or return defaults if no path given."""
+    if path is None:
+        return PreprocessConfig()
+
+    p = Path(path)
+    if not p.exists():
+        console.print(f"[red]Config file not found: {path}[/red]")
+        raise typer.Exit(1)
+
+    suffix = p.suffix.lower()
+    try:
+        if suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError as e:
+                raise ImportError("pip install pyyaml") from e
+            raw = yaml.safe_load(p.read_text())
+        else:
+            raw = json.loads(p.read_text())
+    except Exception as e:
+        console.print(f"[red]Could not parse config {path}: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    try:
+        return PreprocessConfig.model_validate(raw)
+    except Exception as e:
+        console.print(f"[red]Invalid preprocess config: {e}[/red]")
+        raise typer.Exit(1) from e
+
+
+def _apply_cli_overrides(cfg: PreprocessConfig, overrides: dict) -> None:
+    """Set any non-None CLI values onto cfg, overriding YAML/defaults."""
+    for field, value in overrides.items():
+        if value is not None:
+            setattr(cfg, field, value)
 
 
 # ---------------------------------------------------------------------------

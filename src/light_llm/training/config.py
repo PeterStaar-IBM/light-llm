@@ -4,7 +4,7 @@ Pydantic training configuration.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -29,8 +29,9 @@ class SchedulerConfig(BaseModel):
 
 class TrainingConfig(BaseModel):
     # ---- data ----
-    train_data: str              # path or glob to parquet files
-    val_data: Optional[str] = None
+    # Single path/glob string or a list of paths (one per preprocessed dataset).
+    train_data: Union[str, list[str]]
+    val_data: Optional[Union[str, list[str]]] = None
 
     # ---- model ----
     model: TransformerConfig = Field(default_factory=TransformerConfig)

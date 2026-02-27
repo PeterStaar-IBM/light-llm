@@ -11,11 +11,15 @@ uv pip install -e .
 ## Quick start
 
 ```bash
-# 1. Tokenise a dataset (streams from HuggingFace)
+# 1. Tokenise a dataset using a preprocess config file
+llm-preprocess --config configs/preprocess/wikipedia_en.yaml
+
+# Or fully inline (no config file needed):
 llm-preprocess \
     --hf-dataset wikimedia/wikipedia \
     --hf-config  20231101.en \
-    --output     data/wikipedia \
+    --hf-split   train \
+    --output     data/wikipedia/train \
     --tokenizer  hf --tokenizer-path gpt2
 
 # 2. Train

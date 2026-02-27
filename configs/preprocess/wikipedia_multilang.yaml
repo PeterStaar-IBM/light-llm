@@ -1,0 +1,44 @@
+# ============================================================
+# Preprocess: Wikipedia – English, French, German
+#
+# Each subset is written to its own subdirectory under output/:
+#   data/wikipedia/train/20231101.en/
+#   data/wikipedia/train/20231101.fr/
+#   data/wikipedia/train/20231101.de/
+#
+# Usage:
+#   llm-preprocess --config configs/preprocess/wikipedia_multilang.yaml
+#
+# Override the split to get validation shards:
+#   llm-preprocess --config configs/preprocess/wikipedia_multilang.yaml \
+#                  --output data/wikipedia/val --hf-split test
+#
+# Then reference all three in your training config:
+#   train_data:
+#     - data/wikipedia/train/20231101.en
+#     - data/wikipedia/train/20231101.fr
+#     - data/wikipedia/train/20231101.de
+# ============================================================
+
+# ------ HF source ------------------------------------------
+hf_dataset:  wikimedia/wikipedia
+hf_configs:              # processed in sequence; each → output/<subset>/
+  - 20231101.en
+  - 20231101.fr
+  - 20231101.de
+hf_split:    train
+
+# ------ Output ---------------------------------------------
+output:      data/wikipedia/train  # subdirs created automatically per subset
+
+# ------ Tokenizer ------------------------------------------
+tokenizer:       hf
+tokenizer_path:  gpt2
+
+# ------ Sharding -------------------------------------------
+shard_size:    50000
+
+# ------ Filtering ------------------------------------------
+min_length:    32
+
+add_special_tokens: true
