@@ -1,14 +1,58 @@
 [project]
 name = "light-llm"
 version = "0.1.0"
-description = "Add your description here"
+description = "Lightweight LLM training and inference framework for experimentation"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "torch>=2.3.0",
+    "pydantic>=2.6",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+    "tokenizers>=0.19",
+    "tqdm>=4.66",
+    "rich>=13.7",
+    "typer>=0.12",
+    "einops>=0.7",
+    "wandb>=0.16",
+    "safetensors>=0.4",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "datasets>=2.19",
+    "pyyaml>=6.0",
+    "transformers>=5.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+flash = [
+    "flash-attn>=2.5",
+]
 
 [project.scripts]
-light-llm = "light_llm:main"
+llm-preprocess = "light_llm.tools.preprocess:app"
+llm-train      = "light_llm.tools.train:app"
+llm-run        = "light_llm.tools.run:app"
+llm-export     = "light_llm.tools.export:app"
 
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true

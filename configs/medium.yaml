@@ -1,0 +1,72 @@
+# ============================================================
+# Medium Transformer – ~120M params, LLaMA-like recipe
+# Usage: llm-train configs/medium.yaml
+# ============================================================
+
+train_data: data/tokens/train
+val_data:   data/tokens/val
+
+tokenizer_path: meta-llama/Meta-Llama-3-8B   # or gpt2, or local path
+
+model:
+  vocab_size:  128256      # LLaMA-3 tokenizer
+  d_model:     1024
+  num_layers:  12
+  max_seq_len: 4096
+
+  attention:
+    variant:      gqa
+    num_heads:    16
+    num_kv_heads: 4
+    use_flash_attn: false  # set true if flash-attn is installed
+
+  positional:
+    encoding:   rope
+    rope_base:  500000.0   # LLaMA-3 extended RoPE base
+
+  ffn:
+    variant:          swiglu
+    expansion_factor: 2.6667
+
+  norm:
+    type:      rmsnorm
+    placement: pre
+
+  tie_embeddings: false    # LLaMA does not tie embeddings
+  dropout:        0.0
+
+seq_len:    2048
+batch_size: 16
+gradient_accumulation_steps: 4   # effective batch = 64
+
+num_steps: 50000
+
+optimizer:
+  type:         adamw
+  lr:           3.0e-4
+  weight_decay: 0.1
+  beta1:        0.9
+  beta2:        0.95
+  grad_clip:    1.0
+
+scheduler:
+  type:         cosine
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+
+dtype:          bfloat16
+
+checkpoint_dir: checkpoints/medium
+save_every:     2000
+keep_last_n:    3
+
+log_every:  10
+eval_every: 1000
+eval_steps: 100
+
+use_wandb:     false
+wandb_project: light-llm
+
+seed:          42
+num_workers:   4
+compile_model: true
