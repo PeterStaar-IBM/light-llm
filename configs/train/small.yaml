@@ -52,7 +52,7 @@ batch_size: 32
 gradient_accumulation_steps: 1
 
 # ------ Training loop --------------------------------------
-num_steps: 10000
+num_steps: 1000000
 
 optimizer:
   type:         adamw
