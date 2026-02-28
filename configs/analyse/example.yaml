@@ -1,0 +1,41 @@
+# ============================================================
+# Data Analysis: analyse pre-tokenised parquet shards
+#
+# Usage:
+#   llm-analyse --config configs/analyse/example.yaml
+#
+# Override input/output on the CLI (CLI wins over this file):
+#   llm-analyse --config configs/analyse/example.yaml \
+#               --input data/wikipedia/train \
+#               --output analysis/wikipedia
+# ============================================================
+
+# ------ Input / Output -------------------------------------
+input:  data/wikipedia/train     # directory of parquet shards
+output: analysis/wikipedia       # directory for JSON results
+
+# ------ Scope ----------------------------------------------
+per_shard: true   # write {shard_name}_analysis.json for every shard
+aggregate: true   # write global_analysis.json over all shards combined
+
+# ------ Analytics to run -----------------------------------
+analytics:
+  length_histogram: true    # distribution of document lengths (in tokens)
+  token_frequency: true     # per-token occurrence counts + Zipfian distribution
+  token_graph: true         # directed weighted token bigram graph
+
+  # Graph analytics — only active when token_graph: true.
+  # Requires networkx:  uv pip install networkx
+  graph:
+    pagerank: true
+    in_degree_centrality: true
+    out_degree_centrality: true
+    betweenness_centrality: false   # O(V·E)       — disable for large vocabs
+    closeness_centrality: false     # O(V·(V+E))   — disable for large vocabs
+    top_k: 1000                     # top-k nodes per metric written to JSON
+
+# ------ Histogram options ----------------------------------
+histogram_bins: [0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 100000] # number of bins for the length histogram
+
+# ------ Token frequency options ----------------------------
+top_k_tokens: null          # null = all observed tokens; or e.g. 10000

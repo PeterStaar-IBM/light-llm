@@ -22,10 +22,15 @@ llm-preprocess \
     --output     data/wikipedia/train \
     --tokenizer  hf --tokenizer-path gpt2
 
-# 2. Train
+# 2. Analyse the shards (length/token distributions, bigram graph)
+llm-analyse --config configs/analyse/example.yaml
+# or inline:
+llm-analyse --input data/wikipedia/train --output analysis/wikipedia
+
+# 3. Train
 llm-train configs/small.yaml
 
-# 3. Generate
+# 4. Generate
 llm-run --checkpoint checkpoints/small/best --tokenizer gpt2 \
         --prompt "The history of mathematics"
 ```
@@ -33,6 +38,7 @@ llm-run --checkpoint checkpoints/small/best --tokenizer gpt2 \
 ## Docs
 
 - [preprocess](docs/preprocess.md) — tokenise text or HuggingFace datasets into parquet shards
+- [analyse](docs/analyse.md) — analyse shard data: length/token histograms and token bigram graph
 - [train](docs/train.md) — train a model from a config file
 - [run](docs/run.md) — generate text from a trained checkpoint
 - [export](docs/export.md) — export to ONNX, TorchScript, or SafeTensors
