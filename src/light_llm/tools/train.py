@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -44,6 +45,7 @@ app = typer.Typer(
 def main(
     config: Annotated[Path, typer.Argument(help="Path to training config file (.json or .yaml).")],
     resume: Annotated[Optional[str], typer.Option("--resume", "-r", help="Resume from checkpoint path/tag.")] = None,
+    output: Annotated[Optional[Path], typer.Option("--output", "-o", help="Output directory for checkpoints. Defaults to <config-name>-<yyyymmdd-hhmm>.")] = None,
 ) -> None:
 
     if not config.exists():
@@ -54,6 +56,15 @@ def main(
     # Load and validate config
     # ------------------------------------------------------------------
     cfg = _load_config(config)
+
+    # ------------------------------------------------------------------
+    # Resolve output / checkpoint directory
+    # ------------------------------------------------------------------
+    if output is not None:
+        cfg.checkpoint_dir = str(output)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+        cfg.checkpoint_dir = f"{config.stem}-{timestamp}"
 
     # ------------------------------------------------------------------
     # Build model
@@ -123,6 +134,7 @@ def _print_summary(model: Transformer, cfg: TrainingConfig, config_path: Path) -
 
     console.print(f"\n[bold]{model}[/bold]")
     console.print(f"  config    : {config_path}")
+    console.print(f"  output    : {cfg.checkpoint_dir}")
     console.print(f"  device    : {device}{gpu_info}")
     console.print(f"  dtype     : {cfg.dtype}")
     console.print(f"  steps     : {cfg.num_steps:,}")

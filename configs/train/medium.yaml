@@ -3,8 +3,13 @@
 # Usage: llm-train configs/medium.yaml
 # ============================================================
 
-train_data: data/tokens/train
-val_data:   data/tokens/val
+# Each entry is a directory produced by llm-preprocess --output <dir>.
+# Multiple datasets (list) – shards from all dirs are interleaved:
+train_data:
+  - data/wikipedia/train
+  - data/fineweb/train
+val_data:
+  - data/wikipedia/val
 
 tokenizer_path: meta-llama/Meta-Llama-3-8B   # or gpt2, or local path
 

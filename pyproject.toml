@@ -34,16 +34,30 @@ dev = [
 flash = [
     "flash-attn>=2.5",
 ]
+analysis = [
+    "networkx>=3.0",    # graph analytics: PageRank, centralities, etc.
+    "scipy>=1.10",      # required by networkx for fast PageRank
+    "matplotlib>=3.8",  # histogram and token-count plots
+]
 
 [project.scripts]
 llm-preprocess = "light_llm.tools.preprocess:app"
 llm-train      = "light_llm.tools.train:app"
 llm-run        = "light_llm.tools.run:app"
 llm-export     = "light_llm.tools.export:app"
+llm-analyse    = "light_llm.tools.analyse:app"
 
 [build-system]
 requires = ["uv_build>=0.10.6,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.ruff]
 line-length = 100

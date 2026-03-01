@@ -78,7 +78,7 @@ class Trainer:
         # Optimizer & scaler
         # ------------------------------------------------------------------
         self.optimizer = self._build_optimizer()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.dtype == torch.float16))
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=(self.dtype == torch.float16))
 
         # ------------------------------------------------------------------
         # Datasets & loaders
@@ -157,7 +157,7 @@ class Trainer:
                 x = x.to(self.device, non_blocking=True)
                 y = y.to(self.device, non_blocking=True)
 
-                with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                     logits = model(x)
                     loss = F.cross_entropy(
                         logits.reshape(-1, logits.size(-1)),
@@ -187,15 +187,22 @@ class Trainer:
                     cfg.log_every * cfg.batch_size * cfg.gradient_accumulation_steps
                     * cfg.seq_len / max(elapsed, 1e-6)
                 )
+                samples_seen = self.step * cfg.batch_size * cfg.gradient_accumulation_steps
                 pbar.set_postfix(
                     loss=f"{avg_loss:.4f}",
                     lr=f"{lr:.2e}",
                     epoch=self.epoch,
+                    samples=f"{samples_seen/1e3:.1f}k",
                     tok_s=f"{tokens_per_sec/1e3:.1f}k",
                 )
                 if self._wandb:
                     self._wandb.log(
-                        {"train/loss": avg_loss, "train/lr": lr, "train/epoch": self.epoch},
+                        {
+                            "train/loss": avg_loss,
+                            "train/lr": lr,
+                            "train/epoch": self.epoch,
+                            "train/samples": samples_seen,
+                        },
                         step=self.step,
                     )
                 accum_loss = 0.0
@@ -238,7 +245,7 @@ class Trainer:
                 break
             x = x.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True)
-            with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                 logits = self.model(x)
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
@@ -261,10 +268,16 @@ class Trainer:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         weights_path = ckpt_dir / f"{tag}.safetensors"
-        save_file(
-            {k: v.contiguous() for k, v in self.model.state_dict().items()},
-            str(weights_path),
-        )
+        # Skip tensors that share storage (e.g. tied tok_emb / lm_head weights).
+        # The tie is restored automatically by the model's __init__ on load.
+        seen: set[int] = set()
+        tensors: dict[str, object] = {}
+        for k, v in self.model.state_dict().items():
+            ptr = v.data_ptr()
+            if ptr not in seen:
+                seen.add(ptr)
+                tensors[k] = v.contiguous()
+        save_file(tensors, str(weights_path))
 
         state_path = ckpt_dir / f"{tag}.state.pt"
         torch.save(
@@ -301,7 +314,11 @@ class Trainer:
 
         path = Path(path)
         weights = path if path.suffix == ".safetensors" else path.with_suffix(".safetensors")
-        self.model.load_state_dict(load_file(str(weights), device=str(self.device)))
+        # strict=False: tied weights (e.g. lm_head.weight) are omitted from the
+        # checkpoint intentionally and re-tied by the model's __init__.
+        self.model.load_state_dict(
+            load_file(str(weights), device=str(self.device)), strict=False
+        )
 
         state_path = path.parent / f"{path.stem}.state.pt"
         if state_path.exists():
@@ -344,7 +361,7 @@ class Trainer:
         cfg = self.cfg
 
         train_ds = ShardedTokenDataset(
-            shard_paths=self._resolve_paths(cfg.train_data),
+            shard_paths=self._resolve_data(cfg.train_data),
             seq_len=cfg.seq_len,
             base_seed=cfg.seed,
         )
@@ -352,7 +369,7 @@ class Trainer:
         val_ds = None
         if cfg.val_data:
             val_ds = ShardedTokenDataset(
-                shard_paths=self._resolve_paths(cfg.val_data),
+                shard_paths=self._resolve_data(cfg.val_data),
                 seq_len=cfg.seq_len,
                 base_seed=cfg.seed,
             )
@@ -364,14 +381,25 @@ class Trainer:
             ds,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
-            pin_memory=True,
+            pin_memory=(self.device.type == "cuda"),
+            persistent_workers=(self.cfg.num_workers > 0),
             collate_fn=LMCollator(),
             # IterableDataset: DataLoader must NOT shuffle; the dataset handles it
             shuffle=False,
         )
 
     @staticmethod
-    def _resolve_paths(pattern: str) -> list[Path]:
+    def _resolve_data(sources: str | list[str]) -> list[Path]:
+        """Resolve one or more path strings/globs to a flat list of parquet files."""
+        if isinstance(sources, str):
+            sources = [sources]
+        paths: list[Path] = []
+        for src in sources:
+            paths.extend(Trainer._resolve_one(src))
+        return paths
+
+    @staticmethod
+    def _resolve_one(pattern: str) -> list[Path]:
         p = Path(pattern)
         if p.is_file():
             return [p]
