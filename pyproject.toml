@@ -52,11 +52,14 @@ requires = ["uv_build>=0.10.6,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu130" }
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]

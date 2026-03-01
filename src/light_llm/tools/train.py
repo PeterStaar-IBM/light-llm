@@ -64,7 +64,7 @@ def main(
         cfg.checkpoint_dir = str(output)
     else:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-        cfg.checkpoint_dir = f"{config.stem}-{timestamp}"
+        cfg.checkpoint_dir = f"checkpoints-{config.stem}-{timestamp}"
 
     # ------------------------------------------------------------------
     # Build model
