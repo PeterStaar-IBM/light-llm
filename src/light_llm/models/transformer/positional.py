@@ -57,19 +57,30 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._build_cache(max_seq_len)
 
-    def _build_cache(self, seq_len: int) -> None:
-        t = torch.arange(seq_len, device=self.inv_freq.device).float()  # type: ignore[attr-defined]
+    def _build_cache(self, seq_len: int, dtype: torch.dtype = torch.float32) -> None:
+        # Always compute in float32 for numerical precision, then cast to the
+        # target dtype. This is required for flash-attention compatibility:
+        # flash-attn only accepts fp16/bf16 inputs, so if the cache were stored
+        # in float32 it would upcast q/k via PyTorch type promotion and cause a
+        # runtime error.
+        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=torch.float32)  # type: ignore[attr-defined]
         if self.scaling is not None:
             t = t / self.scaling
-        freqs = torch.outer(t, self.inv_freq)  # [seq, head_dim//2]
+        freqs = torch.outer(t, self.inv_freq.float())  # [seq, head_dim//2]
         emb = torch.cat([freqs, freqs], dim=-1)  # [seq, head_dim]
-        self.register_buffer("cos_cache", emb.cos().unsqueeze(0).unsqueeze(0), persistent=False)
-        self.register_buffer("sin_cache", emb.sin().unsqueeze(0).unsqueeze(0), persistent=False)
+        self.register_buffer("cos_cache", emb.cos().unsqueeze(0).unsqueeze(0).to(dtype), persistent=False)
+        self.register_buffer("sin_cache", emb.sin().unsqueeze(0).unsqueeze(0).to(dtype), persistent=False)
         self._cached_seq_len = seq_len
 
-    def _ensure_cache(self, seq_len: int) -> None:
+    def _ensure_cache(self, seq_len: int, dtype: torch.dtype = torch.float32) -> None:
+        # Rebuild if the sequence length has grown; otherwise cast in-place if
+        # the dtype has changed (e.g. on the first bf16 forward pass under
+        # autocast). After that first cast the check is a cheap integer compare.
         if seq_len > self._cached_seq_len:
-            self._build_cache(seq_len)
+            self._build_cache(seq_len, dtype)
+        elif self.cos_cache.dtype != dtype:  # type: ignore[union-attr]
+            self.cos_cache = self.cos_cache.to(dtype)  # type: ignore[union-attr]
+            self.sin_cache = self.sin_cache.to(dtype)  # type: ignore[union-attr]
 
     @staticmethod
     def _rotate_half(x: Tensor) -> Tensor:
@@ -86,7 +97,7 @@ class RotaryEmbedding(nn.Module):
             offset: starting position (for KV-cache incremental decoding)
         """
         seq = q.shape[2]
-        self._ensure_cache(offset + seq)
+        self._ensure_cache(offset + seq, q.dtype)
         cos = self.cos_cache[:, :, offset : offset + seq, :]  # type: ignore[index]
         sin = self.sin_cache[:, :, offset : offset + seq, :]  # type: ignore[index]
         q_rot = q * cos + self._rotate_half(q) * sin

@@ -108,7 +108,11 @@ def _load_model(checkpoint: str, dtype: str, device: str) -> tuple[Transformer, 
 
     console.print(f"[cyan]Loading model from {weights_path}[/cyan]")
     model = Transformer(train_cfg.model)
-    model.load_state_dict(load_file(str(weights_path), device=str(device_)))
+    state_dict = load_file(str(weights_path), device=str(device_))
+    # Tied embeddings are stored only once (tok_emb.weight); restore the alias.
+    if train_cfg.model.tie_embeddings and "lm_head.weight" not in state_dict:
+        state_dict["lm_head.weight"] = state_dict["tok_emb.weight"]
+    model.load_state_dict(state_dict)
     model = model.to(device_, dtype=torch_dtype).eval()
     console.print(f"[green]{model}[/green]\n")
     return model, device_

@@ -1,0 +1,92 @@
+# ============================================================
+# Small Transformer – quick experiments (~25M params)
+# Usage: llm-train configs/small.yaml
+# ============================================================
+
+# ------ Data -----------------------------------------------
+# Each entry is a directory produced by llm-preprocess --output <dir>.
+# Single dataset (string):
+#   train_data: data/wikipedia/train
+# Multiple datasets (list) – shards from all dirs are interleaved:
+train_data:
+  - data/wikipedia/train
+val_data:
+  - data/wikipedia/val
+
+# ------ Tokenizer ------------------------------------------
+# Must match the vocab_size below.
+# Use an HF model name (downloads on first run) or a local
+# directory saved by llm-preprocess --save-tokenizer.
+tokenizer_path: gpt2
+
+# ------ Model ----------------------------------------------
+model:
+  vocab_size:  50257       # must match tokenizer
+  d_model:     512
+  num_layers:  6
+  max_seq_len: 2048
+
+  attention:
+    variant:      gqa      # mha | gqa | mqa | complex
+    num_heads:    8
+    num_kv_heads: 2        # GQA: 8 query heads share 2 KV heads
+
+  positional:
+    encoding: rope         # rope | alibi | sinusoidal | learned | none
+    rope_base: 10000.0
+
+  ffn:
+    variant:          swiglu   # swiglu | geglu | mlp
+    expansion_factor: 2.6667   # ≈ 8/3 (param-equivalent to 4× MLP)
+
+  norm:
+    type:      rmsnorm     # rmsnorm | layernorm
+    placement: pre         # pre | post | sandwich
+
+  tie_embeddings:      true
+  parallel_layers:     false   # PaLM-style parallel attn+FFN
+
+# ------ Sequences ------------------------------------------
+seq_len:    1024
+batch_size: 32
+gradient_accumulation_steps: 1
+
+# ------ Training loop --------------------------------------
+num_steps: 1000000
+
+optimizer:
+  type:         adamw
+  lr:           3.0e-4
+  weight_decay: 0.1
+  beta1:        0.9
+  beta2:        0.95
+  eps:          1.0e-8
+  grad_clip:    1.0
+
+scheduler:
+  type:         cosine    # cosine | linear | constant | wsd
+  warmup_steps: 500
+  min_lr_ratio: 0.1       # final LR = lr * min_lr_ratio
+
+# ------ Precision ------------------------------------------
+dtype: bfloat16           # float32 | float16 | bfloat16
+
+# ------ Checkpointing --------------------------------------
+checkpoint_dir: checkpoints/small
+save_every:     1000
+keep_last_n:    3
+
+# ------ Logging --------------------------------------------
+log_every:  10
+eval_every: 500
+eval_steps: 50            # batches to evaluate per eval run
+
+# ------ W&B (optional) ------------------------------------
+use_wandb:     false
+wandb_project: light-llm
+# wandb_run_name: small-run-01
+
+# ------ Misc -----------------------------------------------
+seed:          42
+num_workers:   4
+compile_model: false      # torch.compile (PyTorch 2.x)

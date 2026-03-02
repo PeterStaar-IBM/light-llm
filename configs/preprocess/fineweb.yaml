@@ -1,0 +1,32 @@
+# ============================================================
+# Preprocess: FineWeb (HuggingFaceFW/fineweb)
+#
+# FineWeb has no named subsets for the default dump; individual
+# crawl snapshots are exposed as --hf-config values, e.g.:
+#   CC-MAIN-2024-10  (latest at time of writing)
+#   CC-MAIN-2023-50
+# Omit hf_config to stream the full deduplicated dataset.
+#
+# Usage:
+#   llm-preprocess --config configs/preprocess/fineweb.yaml
+# ============================================================
+
+# ------ HF source ------------------------------------------
+hf_dataset:   HuggingFaceFW/fineweb
+# hf_config:  CC-MAIN-2024-10   # optional: stream one crawl snapshot
+hf_split:     train
+
+# ------ Output ---------------------------------------------
+output:       data/fineweb/train
+
+# ------ Tokenizer ------------------------------------------
+tokenizer:       hf
+tokenizer_path:  gpt2
+
+# ------ Sharding -------------------------------------------
+shard_size:    100000            # FineWeb docs are short; larger shards save overhead
+
+# ------ Filtering ------------------------------------------
+min_length:    64                # FineWeb is already quality-filtered; use a higher bar
+
+add_special_tokens: true

@@ -27,9 +27,9 @@ Both YAML and JSON are accepted (detected by file extension).
 A minimal example:
 
 ```yaml
-train_data: data/wikipedia    # directory of parquet shards
-val_data:   data/wikipedia-val
-tokenizer_path: gpt2          # sets vocab_size automatically
+train_data: data/wikipedia/train   # directory of parquet shards (from llm-preprocess)
+val_data:   data/wikipedia/val
+tokenizer_path: gpt2
 
 model:
   vocab_size:  50257
@@ -53,11 +53,11 @@ checkpoint_dir: checkpoints/my-run
 
 Ready-to-use configs live in `configs/`:
 
-| file                              | description                              |
-|-----------------------------------|------------------------------------------|
-| `configs/small.yaml`              | ~25 M params, quick experiments          |
-| `configs/medium.yaml`             | ~120 M params, LLaMA-like recipe         |
-| `configs/experiment_complex_attn.yaml` | complex-valued attention experiment |
+| file                                    | description                              |
+|-----------------------------------------|------------------------------------------|
+| `configs/small.yaml`                    | ~25 M params, quick experiments          |
+| `configs/medium.yaml`                   | ~120 M params, LLaMA-like recipe         |
+| `configs/experiment_complex_attn.yaml`  | complex-valued attention experiment      |
 
 ---
 
@@ -70,10 +70,34 @@ No pre-shuffling is done at the file level — instead:
 - Within each shard, rows are read **linearly** in the order they appear.
 - Tokens from consecutive rows are packed into `seq_len`-length windows with no padding waste.
 
-`train_data` and `val_data` can be:
-- A directory (all `*.parquet` files inside are used).
-- A single `.parquet` file.
-- A glob pattern (e.g. `"data/train/shard_*.parquet"`).
+### Specifying data paths
+
+`train_data` and `val_data` each accept either a **single path** or a **list of paths**.
+When a list is given, shards from all sources are pooled into one dataset.
+
+```yaml
+# Single directory (all *.parquet files inside are used)
+train_data: data/wikipedia/train
+
+# Single .parquet file
+train_data: data/wikipedia/train/shard_00000.parquet
+
+# Glob pattern
+train_data: "data/wikipedia/train/shard_*.parquet"
+
+# Multiple datasets — shards from all directories are pooled
+train_data:
+  - data/wikipedia/train/20231101.en
+  - data/wikipedia/train/20231101.fr
+  - data/wikipedia/train/20231101.de
+  - data/fineweb/train
+
+val_data:
+  - data/wikipedia/val/20231101.en
+```
+
+This maps directly to the directory layout produced by `llm-preprocess`.
+See [preprocess.md](preprocess.md) for the recommended layout.
 
 ---
 
@@ -83,8 +107,8 @@ No pre-shuffling is done at the file level — instead:
 
 | key                          | default        | description                                        |
 |------------------------------|----------------|----------------------------------------------------|
-| `train_data`                 | required       | Path or glob to training parquet shards            |
-| `val_data`                   | —              | Path or glob to validation shards                  |
+| `train_data`                 | required       | Path, glob, or list of paths to training shards    |
+| `val_data`                   | —              | Path, glob, or list of paths to validation shards  |
 | `tokenizer_path`             | —              | HF model name or saved tokenizer path              |
 | `seq_len`                    | `1024`         | Training context length (tokens)                   |
 | `batch_size`                 | `32`           | Sequences per gradient step                        |

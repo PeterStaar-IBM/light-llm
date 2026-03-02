@@ -167,23 +167,28 @@ class Attention(nn.Module):
         if self.alibi is not None:
             attn_bias = self.alibi.get_bias(seq_q, offset).to(q.dtype)
 
-        if self.mask_type == "causal":
-            mask = _causal_mask(seq_q, seq_k, q.device)
-        elif self.mask_type == "sliding_window":
+        # Only materialise an explicit mask for sliding-window attention.
+        # Causal attention is handled via is_causal=True so PyTorch's fused /
+        # FlashAttention kernel runs without allocating an O(S²) mask matrix.
+        if self.mask_type == "sliding_window":
             window = self.window_size or seq_k
-            mask = _sliding_window_mask(seq_q, seq_k, window, q.device)
+            mask: Optional[Tensor] = _sliding_window_mask(seq_q, seq_k, window, q.device)
         else:
             mask = None
 
-        # F.scaled_dot_product_attention handles fused attention on modern GPUs
-        return F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attn_bias,
-            is_causal=(self.mask_type == "causal" and attn_bias is None),
-            dropout_p=self.attn_drop.p if self.training else 0.0,
-        ) if mask is None and attn_bias is None else self._manual_sdpa(
-            q, k, v, mask, attn_bias
-        )
+        if mask is None and attn_bias is None:
+            # Fast path: PyTorch picks the best kernel (FlashAttention or math).
+            return F.scaled_dot_product_attention(
+                q, k, v,
+                is_causal=(self.mask_type == "causal"),
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
+
+        # Slow path: ALiBi bias and/or sliding-window mask require the manual kernel.
+        # For causal + ALiBi we still need to explicitly block future tokens.
+        if self.mask_type == "causal" and mask is None:
+            mask = _causal_mask(seq_q, seq_k, q.device)
+        return self._manual_sdpa(q, k, v, mask, attn_bias)
 
     def _manual_sdpa(
         self,
@@ -357,7 +362,7 @@ class ComplexAttention(nn.Module):
         """
         assert self.rope is not None
         seq = q_re.shape[2]
-        self.rope._ensure_cache(offset + seq)
+        self.rope._ensure_cache(offset + seq, q_re.dtype)
         cos = self.rope.cos_cache[:, :, offset : offset + seq, :]  # type: ignore[index]
         sin = self.rope.sin_cache[:, :, offset : offset + seq, :]  # type: ignore[index]
 

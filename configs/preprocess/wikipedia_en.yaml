@@ -1,0 +1,34 @@
+# ============================================================
+# Preprocess: Wikipedia (English, 2023-11-01 snapshot)
+#
+# For a single language subset (hf_config: single string).
+# For multiple languages in one run, see wikipedia_multilang.yaml.
+#
+# Usage:
+#   llm-preprocess --config configs/preprocess/wikipedia_en.yaml
+#
+# Override output or split on the CLI (CLI wins over this file):
+#   llm-preprocess --config configs/preprocess/wikipedia_en.yaml \
+#                  --output data/wikipedia/val --hf-split test
+# ============================================================
+
+# ------ HF source ------------------------------------------
+hf_dataset:   wikimedia/wikipedia
+hf_config:    20231101.en        # single subset; use hf_configs (list) for multiple
+hf_split:     train
+
+# ------ Output ---------------------------------------------
+output:       data/wikipedia/train
+
+# ------ Tokenizer ------------------------------------------
+tokenizer:       hf
+tokenizer_path:  gpt2            # or meta-llama/Meta-Llama-3-8B, etc.
+
+# ------ Sharding -------------------------------------------
+shard_size:    50000             # documents per parquet shard
+
+# ------ Filtering ------------------------------------------
+min_length:    32                # drop documents shorter than this many tokens
+
+# ------ Special tokens -------------------------------------
+add_special_tokens: true         # prepend BOS, append EOS to each document

@@ -4,8 +4,14 @@
 # ============================================================
 
 # ------ Data -----------------------------------------------
-train_data: data/tokens/train   # directory of parquet shards
-val_data:   data/tokens/val
+# Each entry is a directory produced by llm-preprocess --output <dir>.
+# Single dataset (string):
+#   train_data: data/wikipedia/train
+# Multiple datasets (list) – shards from all dirs are interleaved:
+train_data:
+  - data/wikipedia/train
+val_data:
+  - data/wikipedia/val
 
 # ------ Tokenizer ------------------------------------------
 # Must match the vocab_size below.
@@ -46,7 +52,7 @@ batch_size: 32
 gradient_accumulation_steps: 1
 
 # ------ Training loop --------------------------------------
-num_steps: 10000
+num_steps: 1000000
 
 optimizer:
   type:         adamw

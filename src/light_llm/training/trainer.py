@@ -68,9 +68,25 @@ class Trainer:
         torch.manual_seed(cfg.seed)
 
         # ------------------------------------------------------------------
-        # Move / compile model
+        # Move model to device; optionally cast weights to bf16
         # ------------------------------------------------------------------
         self.model = self.model.to(self.device)
+        if cfg.bf16_model_weights:
+            if self.dtype != torch.bfloat16:
+                raise ValueError("bf16_model_weights requires dtype: bfloat16")
+            self.model = self.model.to(dtype=torch.bfloat16)
+
+        # fp32 master parameter copies for bf16-weight training.
+        # Keyed by parameter name so the training loop can zip model ↔ master.
+        # Created before torch.compile so named_parameters() is straightforward.
+        self._masters: Optional[dict[str, torch.Tensor]] = None
+        if cfg.bf16_model_weights:
+            self._masters = {
+                n: p.detach().float().requires_grad_(True)
+                for n, p in self.model.named_parameters()
+                if p.requires_grad
+            }
+
         if cfg.compile_model:
             self.model = torch.compile(self.model)  # type: ignore[assignment]
 
@@ -78,7 +94,7 @@ class Trainer:
         # Optimizer & scaler
         # ------------------------------------------------------------------
         self.optimizer = self._build_optimizer()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.dtype == torch.float16))
+        self.scaler = torch.amp.GradScaler(self.device.type, enabled=(self.dtype == torch.float16))
 
         # ------------------------------------------------------------------
         # Datasets & loaders
@@ -142,6 +158,9 @@ class Trainer:
         while self.step < cfg.num_steps:
 
             self.optimizer.zero_grad(set_to_none=True)
+            if self._masters is not None:
+                # Also zero the bf16 model grads (not tracked by the optimizer).
+                model.zero_grad(set_to_none=True)
             micro_loss = 0.0
 
             for _ in range(cfg.gradient_accumulation_steps):
@@ -157,7 +176,7 @@ class Trainer:
                 x = x.to(self.device, non_blocking=True)
                 y = y.to(self.device, non_blocking=True)
 
-                with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                     logits = model(x)
                     loss = F.cross_entropy(
                         logits.reshape(-1, logits.size(-1)),
@@ -169,10 +188,24 @@ class Trainer:
                 micro_loss += loss.item()
 
             # Clip → step → schedule
-            self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if self._masters is not None:
+                # BF16-weights mode: copy accumulated bf16 grads to fp32 masters,
+                # clip + step on masters (fp32), then write updated values back
+                # to the bf16 model so the next forward uses fresh weights.
+                named = dict(model.named_parameters())
+                for name, master in self._masters.items():
+                    p = named[name]
+                    master.grad = p.grad.float() if p.grad is not None else None
+                nn.utils.clip_grad_norm_(self._masters.values(), cfg.optimizer.grad_clip)
+                self.optimizer.step()
+                for name, master in self._masters.items():
+                    named[name].data.copy_(master.data)  # fp32 → bf16 auto-cast
+            else:
+                # AMP mode: scaler is a no-op for bf16/fp32, handles fp16 scaling.
+                self.scaler.unscale_(self.optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
             self.scheduler.step()
             self.step += 1
 
@@ -187,15 +220,22 @@ class Trainer:
                     cfg.log_every * cfg.batch_size * cfg.gradient_accumulation_steps
                     * cfg.seq_len / max(elapsed, 1e-6)
                 )
+                samples_seen = self.step * cfg.batch_size * cfg.gradient_accumulation_steps
                 pbar.set_postfix(
                     loss=f"{avg_loss:.4f}",
                     lr=f"{lr:.2e}",
                     epoch=self.epoch,
+                    samples=f"{samples_seen/1e3:.1f}k",
                     tok_s=f"{tokens_per_sec/1e3:.1f}k",
                 )
                 if self._wandb:
                     self._wandb.log(
-                        {"train/loss": avg_loss, "train/lr": lr, "train/epoch": self.epoch},
+                        {
+                            "train/loss": avg_loss,
+                            "train/lr": lr,
+                            "train/epoch": self.epoch,
+                            "train/samples": samples_seen,
+                        },
                         step=self.step,
                     )
                 accum_loss = 0.0
@@ -238,7 +278,7 @@ class Trainer:
                 break
             x = x.to(self.device, non_blocking=True)
             y = y.to(self.device, non_blocking=True)
-            with torch.amp.autocast("cuda", dtype=self.dtype, enabled=self.use_amp):
+            with torch.amp.autocast(self.device.type, dtype=self.dtype, enabled=self.use_amp):
                 logits = self.model(x)
                 loss = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)),
@@ -261,10 +301,16 @@ class Trainer:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         weights_path = ckpt_dir / f"{tag}.safetensors"
-        save_file(
-            {k: v.contiguous() for k, v in self.model.state_dict().items()},
-            str(weights_path),
-        )
+        # Skip tensors that share storage (e.g. tied tok_emb / lm_head weights).
+        # The tie is restored automatically by the model's __init__ on load.
+        seen: set[int] = set()
+        tensors: dict[str, object] = {}
+        for k, v in self.model.state_dict().items():
+            ptr = v.data_ptr()
+            if ptr not in seen:
+                seen.add(ptr)
+                tensors[k] = v.contiguous()
+        save_file(tensors, str(weights_path))
 
         state_path = ckpt_dir / f"{tag}.state.pt"
         torch.save(
@@ -301,7 +347,11 @@ class Trainer:
 
         path = Path(path)
         weights = path if path.suffix == ".safetensors" else path.with_suffix(".safetensors")
-        self.model.load_state_dict(load_file(str(weights), device=str(self.device)))
+        # strict=False: tied weights (e.g. lm_head.weight) are omitted from the
+        # checkpoint intentionally and re-tied by the model's __init__.
+        self.model.load_state_dict(
+            load_file(str(weights), device=str(self.device)), strict=False
+        )
 
         state_path = path.parent / f"{path.stem}.state.pt"
         if state_path.exists():
@@ -312,6 +362,13 @@ class Trainer:
             self.scheduler.load_state_dict(state["scheduler"])
             self.scaler.load_state_dict(state["scaler"])
             self.best_val_loss = state.get("best_val_loss", float("inf"))
+
+        # After loading bf16 model weights, bring the fp32 masters in sync so
+        # the optimizer continues from the correct parameter values.
+        if self._masters is not None:
+            named = dict(self.model.named_parameters())
+            for name, master in self._masters.items():
+                master.data.copy_(named[name].data.float())
 
     # ------------------------------------------------------------------
     # Helpers
@@ -324,8 +381,17 @@ class Trainer:
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         oc = self.cfg.optimizer
-        decay = [p for p in self.model.parameters() if p.requires_grad and p.dim() >= 2]
-        no_decay = [p for p in self.model.parameters() if p.requires_grad and p.dim() < 2]
+        # When bf16_model_weights is on, the optimizer steps on fp32 master copies
+        # so that momentum / variance accumulate in full precision.  The master
+        # params have the same shape (and therefore the same dim()) as the
+        # corresponding model params, so the decay split is identical.
+        params = (
+            list(self._masters.values())
+            if self._masters is not None
+            else [p for p in self.model.parameters() if p.requires_grad]
+        )
+        decay   = [p for p in params if p.dim() >= 2]
+        no_decay = [p for p in params if p.dim() < 2]
         groups = [
             {"params": decay,    "weight_decay": oc.weight_decay},
             {"params": no_decay, "weight_decay": 0.0},
@@ -344,7 +410,7 @@ class Trainer:
         cfg = self.cfg
 
         train_ds = ShardedTokenDataset(
-            shard_paths=self._resolve_paths(cfg.train_data),
+            shard_paths=self._resolve_data(cfg.train_data),
             seq_len=cfg.seq_len,
             base_seed=cfg.seed,
         )
@@ -352,7 +418,7 @@ class Trainer:
         val_ds = None
         if cfg.val_data:
             val_ds = ShardedTokenDataset(
-                shard_paths=self._resolve_paths(cfg.val_data),
+                shard_paths=self._resolve_data(cfg.val_data),
                 seq_len=cfg.seq_len,
                 base_seed=cfg.seed,
             )
@@ -364,14 +430,25 @@ class Trainer:
             ds,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
-            pin_memory=True,
+            pin_memory=(self.device.type == "cuda"),
+            persistent_workers=(self.cfg.num_workers > 0),
             collate_fn=LMCollator(),
             # IterableDataset: DataLoader must NOT shuffle; the dataset handles it
             shuffle=False,
         )
 
     @staticmethod
-    def _resolve_paths(pattern: str) -> list[Path]:
+    def _resolve_data(sources: str | list[str]) -> list[Path]:
+        """Resolve one or more path strings/globs to a flat list of parquet files."""
+        if isinstance(sources, str):
+            sources = [sources]
+        paths: list[Path] = []
+        for src in sources:
+            paths.extend(Trainer._resolve_one(src))
+        return paths
+
+    @staticmethod
+    def _resolve_one(pattern: str) -> list[Path]:
         p = Path(pattern)
         if p.is_file():
             return [p]
