@@ -47,6 +47,11 @@ model:
   tie_embeddings:      true
   parallel_layers:     false   # PaLM-style parallel attn+FFN
 
+  # Recompute layer activations during backward instead of storing them.
+  # Cuts activation memory by ~10-12 GB for this config at the cost of
+  # ~33% extra compute per step.
+  gradient_checkpointing: true
+
 # ------ Sequences ------------------------------------------
 seq_len:    1024
 batch_size: 32
@@ -71,6 +76,12 @@ scheduler:
 
 # ------ Precision ------------------------------------------
 dtype: bfloat16           # float32 | float16 | bfloat16
+
+# false (default / AMP): weights stay float32, compute runs in bf16 via autocast.
+# true  (BF16 weights):  weights stored as bf16; fp32 master copies kept for the
+#                        optimizer so momentum/variance remain numerically stable.
+#                        Requires dtype: bfloat16.
+bf16_model_weights: true
 
 # ------ Checkpointing --------------------------------------
 checkpoint_dir: checkpoints/small

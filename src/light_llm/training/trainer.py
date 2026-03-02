@@ -68,9 +68,25 @@ class Trainer:
         torch.manual_seed(cfg.seed)
 
         # ------------------------------------------------------------------
-        # Move / compile model
+        # Move model to device; optionally cast weights to bf16
         # ------------------------------------------------------------------
         self.model = self.model.to(self.device)
+        if cfg.bf16_model_weights:
+            if self.dtype != torch.bfloat16:
+                raise ValueError("bf16_model_weights requires dtype: bfloat16")
+            self.model = self.model.to(dtype=torch.bfloat16)
+
+        # fp32 master parameter copies for bf16-weight training.
+        # Keyed by parameter name so the training loop can zip model ↔ master.
+        # Created before torch.compile so named_parameters() is straightforward.
+        self._masters: Optional[dict[str, torch.Tensor]] = None
+        if cfg.bf16_model_weights:
+            self._masters = {
+                n: p.detach().float().requires_grad_(True)
+                for n, p in self.model.named_parameters()
+                if p.requires_grad
+            }
+
         if cfg.compile_model:
             self.model = torch.compile(self.model)  # type: ignore[assignment]
 
@@ -142,6 +158,9 @@ class Trainer:
         while self.step < cfg.num_steps:
 
             self.optimizer.zero_grad(set_to_none=True)
+            if self._masters is not None:
+                # Also zero the bf16 model grads (not tracked by the optimizer).
+                model.zero_grad(set_to_none=True)
             micro_loss = 0.0
 
             for _ in range(cfg.gradient_accumulation_steps):
@@ -169,10 +188,24 @@ class Trainer:
                 micro_loss += loss.item()
 
             # Clip → step → schedule
-            self.scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if self._masters is not None:
+                # BF16-weights mode: copy accumulated bf16 grads to fp32 masters,
+                # clip + step on masters (fp32), then write updated values back
+                # to the bf16 model so the next forward uses fresh weights.
+                named = dict(model.named_parameters())
+                for name, master in self._masters.items():
+                    p = named[name]
+                    master.grad = p.grad.float() if p.grad is not None else None
+                nn.utils.clip_grad_norm_(self._masters.values(), cfg.optimizer.grad_clip)
+                self.optimizer.step()
+                for name, master in self._masters.items():
+                    named[name].data.copy_(master.data)  # fp32 → bf16 auto-cast
+            else:
+                # AMP mode: scaler is a no-op for bf16/fp32, handles fp16 scaling.
+                self.scaler.unscale_(self.optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), cfg.optimizer.grad_clip)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
             self.scheduler.step()
             self.step += 1
 
@@ -330,6 +363,13 @@ class Trainer:
             self.scaler.load_state_dict(state["scaler"])
             self.best_val_loss = state.get("best_val_loss", float("inf"))
 
+        # After loading bf16 model weights, bring the fp32 masters in sync so
+        # the optimizer continues from the correct parameter values.
+        if self._masters is not None:
+            named = dict(self.model.named_parameters())
+            for name, master in self._masters.items():
+                master.data.copy_(named[name].data.float())
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -341,8 +381,17 @@ class Trainer:
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         oc = self.cfg.optimizer
-        decay = [p for p in self.model.parameters() if p.requires_grad and p.dim() >= 2]
-        no_decay = [p for p in self.model.parameters() if p.requires_grad and p.dim() < 2]
+        # When bf16_model_weights is on, the optimizer steps on fp32 master copies
+        # so that momentum / variance accumulate in full precision.  The master
+        # params have the same shape (and therefore the same dim()) as the
+        # corresponding model params, so the decay split is identical.
+        params = (
+            list(self._masters.values())
+            if self._masters is not None
+            else [p for p in self.model.parameters() if p.requires_grad]
+        )
+        decay   = [p for p in params if p.dim() >= 2]
+        no_decay = [p for p in params if p.dim() < 2]
         groups = [
             {"params": decay,    "weight_decay": oc.weight_decay},
             {"params": no_decay, "weight_decay": 0.0},

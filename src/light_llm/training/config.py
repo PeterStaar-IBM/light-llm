@@ -52,6 +52,12 @@ class TrainingConfig(BaseModel):
 
     # ---- precision ----
     dtype: Literal["float32", "float16", "bfloat16"] = "bfloat16"
+    # False (default / AMP): model weights stay float32; autocast runs compute
+    #   in bf16/fp16.  Safe and simple; weights + gradients cost 2× vs bf16.
+    # True (BF16 weights): model weights stored as bf16; fp32 master copies are
+    #   maintained for the optimizer so momentum/variance stay numerically stable.
+    #   Requires dtype: bfloat16.  Saves ~weight_size of GPU memory.
+    bf16_model_weights: bool = False
 
     # ---- checkpointing ----
     checkpoint_dir: str = "checkpoints"

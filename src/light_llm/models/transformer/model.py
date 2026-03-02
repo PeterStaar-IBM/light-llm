@@ -19,6 +19,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from light_llm.models.transformer.blocks import TransformerBlock
 from light_llm.models.transformer.config import TransformerConfig
@@ -148,12 +149,18 @@ class Transformer(nn.Module):
         new_kvs: list[tuple[Tensor, Tensor]] = []
         for i, layer in enumerate(self.layers):
             pkv = past_kvs[i] if past_kvs else None
-            result = layer(x, past_kv=pkv, return_kv=return_kvs)
-            if return_kvs:
-                x, kv = result  # type: ignore[misc]
-                new_kvs.append(kv)
+            if self.cfg.gradient_checkpointing and self.training and not return_kvs:
+                # Recompute activations during backward instead of storing them.
+                # KV-cache (return_kvs) is inference-only, so never combined with
+                # checkpointing.  past_kv is None during training.
+                x = checkpoint(layer, x, None, False, use_reentrant=False)
             else:
-                x = result  # type: ignore[assignment]
+                result = layer(x, past_kv=pkv, return_kv=return_kvs)
+                if return_kvs:
+                    x, kv = result  # type: ignore[misc]
+                    new_kvs.append(kv)
+                else:
+                    x = result  # type: ignore[assignment]
 
         x = self.final_norm(x)
         logits = self.lm_head(x)

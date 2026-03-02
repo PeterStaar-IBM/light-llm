@@ -128,6 +128,11 @@ class TransformerConfig(BaseModel):
     # Scaled init for residual projections (GPT-2 style): std / sqrt(2 * n_layers)
     residual_scaled_init: bool = True
 
+    # Gradient checkpointing: recompute activations during backward instead of
+    # storing them, trading compute for memory.  Only active during training
+    # (i.e. when model.training is True); inference is unaffected.
+    gradient_checkpointing: bool = False
+
     @model_validator(mode="after")
     def _derived_fields(self) -> "TransformerConfig":
         # Infer head_dim when not given
